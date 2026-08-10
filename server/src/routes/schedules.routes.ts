@@ -3,6 +3,7 @@ import { z } from "zod";
 import { pool } from "../db/pool";
 import { requireAuth, requireRole } from "../middleware/auth";
 import { wrapAsync } from "../middleware/errorHandler";
+import { toCamelCase } from "../utils/caseConvert";
 
 export const schedulesRouter = Router();
 
@@ -16,7 +17,7 @@ schedulesRouter.get(
        FROM schedules WHERE org_id = $1 ORDER BY created_at DESC`,
       [req.user!.orgId]
     );
-    res.json(result.rows);
+    res.json(toCamelCase(result.rows));
   })
 );
 
@@ -37,7 +38,7 @@ schedulesRouter.post(
        RETURNING id, org_id, name, rotation_length_days, max_consecutive_days, blackout_dates, created_at`,
       [req.user!.orgId, body.name, body.rotationLengthDays, body.maxConsecutiveDays]
     );
-    res.status(201).json(result.rows[0]);
+    res.status(201).json(toCamelCase(result.rows[0]));
   })
 );
 
@@ -60,7 +61,7 @@ schedulesRouter.get(
     if (result.rows.length === 0) {
       return res.status(404).json({ error: "No one is currently on-call for this schedule" });
     }
-    res.json(result.rows[0]);
+    res.json(toCamelCase(result.rows[0]));
   })
 );
 
@@ -77,7 +78,7 @@ schedulesRouter.get(
        ORDER BY s.starts_at`,
       [req.params.id, req.user!.orgId]
     );
-    res.json(result.rows);
+    res.json(toCamelCase(result.rows));
   })
 );
 
@@ -110,6 +111,6 @@ schedulesRouter.post(
        RETURNING id, schedule_id, user_id, starts_at, ends_at, generated_by_algorithm`,
       [req.params.id, body.userId, body.startsAt, body.endsAt]
     );
-    res.status(201).json(result.rows[0]);
+    res.status(201).json(toCamelCase(result.rows[0]));
   })
 );

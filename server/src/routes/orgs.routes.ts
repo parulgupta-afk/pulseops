@@ -2,6 +2,7 @@ import { Router } from "express";
 import { pool } from "../db/pool";
 import { requireAuth } from "../middleware/auth";
 import { wrapAsync } from "../middleware/errorHandler";
+import { toCamelCase } from "../utils/caseConvert";
 
 export const orgsRouter = Router();
 
@@ -18,6 +19,6 @@ orgsRouter.get(
     if (result.rows.length === 0) {
       return res.status(404).json({ error: "Org not found" });
     }
-    res.json(result.rows[0]);
+    res.json(toCamelCase(result.rows[0]));
   })
 );

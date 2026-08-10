@@ -160,6 +160,28 @@ button, input, select {
 
 .btn-danger { background: var(--firing); color: #FDECEA; }
 
+.live-indicator {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+
+.live-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-muted);
+}
+
+.live-dot.on {
+  background: var(--resolved);
+  box-shadow: 0 0 0 0 rgba(63, 191, 127, 0.6);
+  animation: pulse-ring 2s infinite;
+}
+
 /* ---- Filter tabs ---- */
 
 .tabs {

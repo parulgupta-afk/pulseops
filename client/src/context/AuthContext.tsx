@@ -1,5 +1,6 @@
 import { createContext, useContext, useState, useEffect, type ReactNode } from "react";
 import type { AuthUser } from "@pulseops/shared-types";
+import { connectSocket, disconnectSocket } from "../api/socket";
 
 interface AuthContextValue {
   user: AuthUser | null;
@@ -14,19 +15,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     const stored = localStorage.getItem("pulseops_user");
-    if (stored) setUser(JSON.parse(stored));
+    if (stored) {
+      setUser(JSON.parse(stored));
+      connectSocket();
+    }
   }, []);
 
   function login(token: string, user: AuthUser) {
     localStorage.setItem("pulseops_token", token);
     localStorage.setItem("pulseops_user", JSON.stringify(user));
     setUser(user);
+    connectSocket();
   }
 
   function logout() {
     localStorage.removeItem("pulseops_token");
     localStorage.removeItem("pulseops_user");
     setUser(null);
+    disconnectSocket();
   }
 
   return <AuthContext.Provider value={{ user, login, logout }}>{children}</AuthContext.Provider>;

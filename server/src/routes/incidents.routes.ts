@@ -3,6 +3,8 @@ import { z } from "zod";
 import { pool } from "../db/pool";
 import { requireAuth } from "../middleware/auth";
 import { wrapAsync } from "../middleware/errorHandler";
+import { toCamelCase } from "../utils/caseConvert";
+import { publishIncidentEvent } from "../realtime/redisPubSub";
 
 export const incidentsRouter = Router();
 
@@ -23,7 +25,7 @@ incidentsRouter.get(
        LIMIT 100`,
       [req.user!.orgId, status ?? null]
     );
-    res.json(result.rows);
+    res.json(toCamelCase(result.rows));
   })
 );
 
@@ -39,7 +41,7 @@ incidentsRouter.get(
     if (result.rows.length === 0) {
       return res.status(404).json({ error: "Incident not found" });
     }
-    res.json(result.rows[0]);
+    res.json(toCamelCase(result.rows[0]));
   })
 );
 
@@ -54,7 +56,7 @@ incidentsRouter.get(
        ORDER BY e.timestamp ASC`,
       [req.params.id, req.user!.orgId]
     );
-    res.json(result.rows);
+    res.json(toCamelCase(result.rows));
   })
 );
 
@@ -84,7 +86,7 @@ incidentsRouter.post(
       [req.user!.orgId, body.idempotencyKey]
     );
     if (existing.rows.length > 0) {
-      return res.status(200).json(existing.rows[0]);
+      return res.status(200).json(toCamelCase(existing.rows[0]));
     }
 
     let assignedUserId: string | null = null;
@@ -126,7 +128,12 @@ incidentsRouter.post(
       }
 
       await client.query("COMMIT");
-      res.status(201).json(incident);
+
+      // Fire-and-forget: don't make the caller (often a monitoring webhook)
+      // wait on the broadcast fan-out before getting its 201 back.
+      publishIncidentEvent({ orgId: req.user!.orgId, type: "incident:created", incident: toCamelCase(incident) });
+
+      res.status(201).json(toCamelCase(incident));
     } catch (err) {
       await client.query("ROLLBACK");
       throw err;
@@ -154,7 +161,8 @@ incidentsRouter.post(
        VALUES ($1, 'acknowledged', $2, NULL)`,
       [req.params.id, req.user!.id]
     );
-    res.json(result.rows[0]);
+    publishIncidentEvent({ orgId: req.user!.orgId, type: "incident:updated", incident: toCamelCase(result.rows[0]) });
+    res.json(toCamelCase(result.rows[0]));
   })
 );
 
@@ -176,7 +184,8 @@ incidentsRouter.post(
        VALUES ($1, 'resolved', $2, NULL)`,
       [req.params.id, req.user!.id]
     );
-    res.json(result.rows[0]);
+    publishIncidentEvent({ orgId: req.user!.orgId, type: "incident:updated", incident: toCamelCase(result.rows[0]) });
+    res.json(toCamelCase(result.rows[0]));
   })
 );
 
@@ -197,6 +206,7 @@ incidentsRouter.patch(
     if (result.rows.length === 0) {
       return res.status(404).json({ error: "Incident not found" });
     }
-    res.json(result.rows[0]);
+    publishIncidentEvent({ orgId: req.user!.orgId, type: "incident:updated", incident: toCamelCase(result.rows[0]) });
+    res.json(toCamelCase(result.rows[0]));
   })
 );

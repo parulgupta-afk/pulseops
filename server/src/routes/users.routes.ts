@@ -3,6 +3,7 @@ import { z } from "zod";
 import { pool } from "../db/pool";
 import { requireAuth, requireRole } from "../middleware/auth";
 import { wrapAsync } from "../middleware/errorHandler";
+import { toCamelCase } from "../utils/caseConvert";
 import { hashPassword } from "../utils/password";
 
 export const usersRouter = Router();
@@ -19,7 +20,7 @@ usersRouter.get(
        FROM users WHERE org_id = $1 ORDER BY name`,
       [req.user!.orgId]
     );
-    res.json(result.rows);
+    res.json(toCamelCase(result.rows));
   })
 );
 
@@ -47,7 +48,7 @@ usersRouter.post(
          RETURNING id, org_id, name, email, phone, role, created_at`,
         [req.user!.orgId, body.name, body.email, body.phone ?? null, passwordHash, body.role]
       );
-      res.status(201).json(result.rows[0]);
+      res.status(201).json(toCamelCase(result.rows[0]));
     } catch (err: any) {
       if (err.code === "23505") {
         return res.status(409).json({ error: "Email already registered" });
