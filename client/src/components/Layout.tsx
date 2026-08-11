@@ -25,6 +25,9 @@ export function Layout({ children }: { children: ReactNode }) {
           <NavLink to="/schedule" className={({ isActive }) => `nav-link${isActive ? " active" : ""}`}>
             On-call schedule
           </NavLink>
+          <NavLink to="/escalation-policies" className={({ isActive }) => `nav-link${isActive ? " active" : ""}`}>
+            Escalation policies
+          </NavLink>
         </nav>
         <div className="sidebar-footer">
           <div>{user?.email}</div>

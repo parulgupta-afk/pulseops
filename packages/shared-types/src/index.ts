@@ -79,6 +79,10 @@ export interface Incident {
   firedAt: string;
   ackedAt: string | null;
   resolvedAt: string | null;
+  // Phase 4: which escalation policy (if any) pages/re-pages this incident,
+  // and how far through its steps the worker has gotten.
+  escalationPolicyId?: string | null;
+  currentEscalationStep?: number;
   // Populated starting Phase 5 (RAG embeddings). Omitted from API responses until then.
   embeddingVector?: number[] | null;
 }
@@ -108,6 +112,44 @@ export interface Postmortem {
   createdAt: string;
 }
 
+// ---- Phase 3: constraint-based rotation generator ----
+
+export interface ScheduleMember {
+  id: string;
+  scheduleId: string;
+  userId: string;
+  name: string; // joined in from users for display
+  blackoutDates: string[]; // ISO dates this person is unavailable — hard constraint
+}
+
+export type RotationViolationType =
+  | "no_coverage" // every member was blacked out that day — genuinely unfillable
+  | "max_consecutive_relaxed"; // had to exceed maxConsecutiveDays because no one else was available
+
+export interface RotationViolation {
+  date: string; // ISO date the violation occurred on
+  type: RotationViolationType;
+  message: string;
+}
+
+export interface FairnessReportEntry {
+  userId: string;
+  name: string;
+  totalDays: number;
+  weekendDays: number;
+}
+
+export interface GenerateRotationRequest {
+  startDate: string; // ISO date, inclusive
+  endDate: string; // ISO date, exclusive
+}
+
+export interface GenerateRotationResponse {
+  shifts: ScheduleShift[];
+  violations: RotationViolation[];
+  fairnessReport: FairnessReportEntry[];
+}
+
 // ---- API request/response shapes ----
 
 export interface LoginRequest {
@@ -131,6 +173,13 @@ export interface CreateIncidentRequest {
   idempotencyKey: string;
   title: string;
   description: string;
+  scheduleId?: string;
+  escalationPolicyId?: string;
+}
+
+export interface CreateEscalationPolicyRequest {
+  name: string;
+  steps: EscalationStep[];
 }
 
 export interface ApiError {

@@ -379,3 +379,63 @@ button, input, select {
 
 .form-row { display: flex; gap: 10px; align-items: flex-end; margin-bottom: 20px; flex-wrap: wrap; }
 .form-row .field { margin-bottom: 0; flex: 1; min-width: 150px; }
+
+/* ---- Phase 3: roster / rotation panels ---- */
+
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 20px 22px;
+  margin-bottom: 20px;
+}
+
+.panel-title {
+  font-family: var(--font-display);
+  font-size: 16px;
+  font-weight: 700;
+  margin: 0 0 4px 0;
+}
+
+.panel-subtitle {
+  color: var(--text-muted);
+  font-size: 13px;
+  margin: 0 0 16px 0;
+}
+
+.violations-panel {
+  background: var(--acked-dim);
+  border: 1px solid var(--acked);
+  border-radius: 8px;
+  padding: 12px 14px;
+  font-size: 13px;
+  margin-top: 12px;
+}
+
+.violations-panel.clean {
+  background: var(--resolved-dim);
+  border-color: var(--resolved);
+  color: var(--resolved);
+}
+
+.violations-title {
+  font-weight: 600;
+  margin-bottom: 6px;
+  color: var(--acked);
+}
+
+.violations-panel ul {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.violations-panel li {
+  margin-bottom: 4px;
+}
+
+.violation-type {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}

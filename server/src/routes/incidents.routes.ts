@@ -5,6 +5,7 @@ import { requireAuth } from "../middleware/auth";
 import { wrapAsync } from "../middleware/errorHandler";
 import { toCamelCase } from "../utils/caseConvert";
 import { publishIncidentEvent } from "../realtime/redisPubSub";
+import { enqueuePage } from "../queue/incidentQueue";
 
 export const incidentsRouter = Router();
 
@@ -65,13 +66,17 @@ const createIncidentSchema = z.object({
   title: z.string().min(1),
   description: z.string().default(""),
   scheduleId: z.string().uuid().optional(), // if given, auto-assign to current on-call
+  escalationPolicyId: z.string().uuid().optional(), // if given, worker pages step 0 and escalates on timeout
 });
 
-// This is the ingestion endpoint. Phase 1: synchronous insert + optional
-// auto-assignment from a schedule's current on-call shift, no paging yet.
-// Phase 4 moves the "resolve on-call + notify" work onto a BullMQ worker and
-// adds the 24h idempotency-window dedupe this route only approximates today
-// via the DB unique constraint on (org_id, idempotency_key).
+// This is the ingestion endpoint. The DB insert + optional on-call
+// auto-assignment still happens synchronously so the caller (often a
+// monitoring webhook) gets a fast 201. Everything that can be slow or fail
+// transiently — actually sending a notification, and escalating if it's not
+// acknowledged in time — is handed off to a BullMQ job so it doesn't block
+// this request. Idempotency is still enforced via the DB unique constraint
+// on (org_id, idempotency_key) rather than a separate 24h-window cache table
+// — functionally equivalent for this project's scale, simpler to reason about.
 incidentsRouter.post(
   "/",
   wrapAsync(async (req, res) => {
@@ -102,15 +107,28 @@ incidentsRouter.post(
       assignedUserId = oncall.rows[0]?.user_id ?? null;
     }
 
+    // If an escalation policy is provided, validate it belongs to this org
+    // before committing the insert — a bad ID here shouldn't silently create
+    // an incident that can never be paged.
+    if (body.escalationPolicyId) {
+      const policyCheck = await pool.query(
+        `SELECT id FROM escalation_policies WHERE id = $1 AND org_id = $2`,
+        [body.escalationPolicyId, req.user!.orgId]
+      );
+      if (policyCheck.rows.length === 0) {
+        return res.status(400).json({ error: "escalationPolicyId does not belong to this org" });
+      }
+    }
+
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
       const incidentResult = await client.query(
-        `INSERT INTO incidents (org_id, idempotency_key, title, description, assigned_user_id)
-         VALUES ($1, $2, $3, $4, $5)
+        `INSERT INTO incidents (org_id, idempotency_key, title, description, assigned_user_id, escalation_policy_id)
+         VALUES ($1, $2, $3, $4, $5, $6)
          RETURNING id, org_id, idempotency_key, title, description, status,
-                   assigned_user_id, fired_at, acked_at, resolved_at`,
-        [req.user!.orgId, body.idempotencyKey, body.title, body.description, assignedUserId]
+                   assigned_user_id, fired_at, acked_at, resolved_at, escalation_policy_id`,
+        [req.user!.orgId, body.idempotencyKey, body.title, body.description, assignedUserId, body.escalationPolicyId ?? null]
       );
       const incident = incidentResult.rows[0];
 
@@ -119,7 +137,11 @@ incidentsRouter.post(
          VALUES ($1, 'fired', NULL, $2)`,
         [incident.id, assignedUserId ? "Incident fired and auto-assigned" : "Incident fired"]
       );
-      if (assignedUserId) {
+      // Without an escalation policy, this is the old Phase 1 behavior — a
+      // note that someone's assigned, no actual notification sent. With a
+      // policy, the queue job below sends a real (mocked) notification and
+      // logs its own 'paged' event once it actually runs.
+      if (assignedUserId && !body.escalationPolicyId) {
         await client.query(
           `INSERT INTO incident_events (incident_id, type, actor_id, message)
            VALUES ($1, 'paged', NULL, 'Assigned to current on-call responder')`,
@@ -132,6 +154,10 @@ incidentsRouter.post(
       // Fire-and-forget: don't make the caller (often a monitoring webhook)
       // wait on the broadcast fan-out before getting its 201 back.
       publishIncidentEvent({ orgId: req.user!.orgId, type: "incident:created", incident: toCamelCase(incident) });
+
+      if (body.escalationPolicyId) {
+        await enqueuePage({ incidentId: incident.id, orgId: req.user!.orgId, step: 0 });
+      }
 
       res.status(201).json(toCamelCase(incident));
     } catch (err) {
