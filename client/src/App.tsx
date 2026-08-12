@@ -5,6 +5,7 @@ import { Register } from "./pages/Register";
 import { Dashboard } from "./pages/Dashboard";
 import { SchedulePage } from "./pages/Schedule";
 import { EscalationPolicies } from "./pages/EscalationPolicies";
+import { IncidentDetail } from "./pages/IncidentDetail";
 
 function ProtectedRoute({ children }: { children: JSX.Element }) {
   const { user } = useAuth();
@@ -38,6 +39,14 @@ function AppRoutes() {
         element={
           <ProtectedRoute>
             <EscalationPolicies />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/incidents/:id"
+        element={
+          <ProtectedRoute>
+            <IncidentDetail />
           </ProtectedRoute>
         }
       />

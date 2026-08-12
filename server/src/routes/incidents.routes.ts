@@ -6,6 +6,7 @@ import { wrapAsync } from "../middleware/errorHandler";
 import { toCamelCase } from "../utils/caseConvert";
 import { publishIncidentEvent } from "../realtime/redisPubSub";
 import { enqueuePage } from "../queue/incidentQueue";
+import { enqueueEmbedAndSuggest } from "../queue/incidentQueue";
 
 export const incidentsRouter = Router();
 
@@ -43,6 +44,31 @@ incidentsRouter.get(
       return res.status(404).json({ error: "Incident not found" });
     }
     res.json(toCamelCase(result.rows[0]));
+  })
+);
+
+const addNoteSchema = z.object({ message: z.string().min(1) });
+
+// Lets a responder record what actually fixed it. This is what gives the
+// RAG grounding in Phase 5 something real to cite beyond the original
+// description — without notes here, "similar past incidents" only has the
+// initial report to go on, not the resolution.
+incidentsRouter.post(
+  "/:id/notes",
+  wrapAsync(async (req, res) => {
+    const body = addNoteSchema.parse(req.body);
+    const incidentCheck = await pool.query(`SELECT id FROM incidents WHERE id = $1 AND org_id = $2`, [
+      req.params.id,
+      req.user!.orgId,
+    ]);
+    if (incidentCheck.rows.length === 0) {
+      return res.status(404).json({ error: "Incident not found" });
+    }
+    await pool.query(
+      `INSERT INTO incident_events (incident_id, type, actor_id, message) VALUES ($1, 'note', $2, $3)`,
+      [req.params.id, req.user!.id, body.message]
+    );
+    res.status(201).json({ ok: true });
   })
 );
 
@@ -159,6 +185,11 @@ incidentsRouter.post(
         await enqueuePage({ incidentId: incident.id, orgId: req.user!.orgId, step: 0 });
       }
 
+      // Always embed + look for similar past incidents, independent of
+      // whether an escalation policy is set — RAG triage isn't gated on
+      // paging config the way notifications are.
+      await enqueueEmbedAndSuggest({ incidentId: incident.id, orgId: req.user!.orgId });
+
       res.status(201).json(toCamelCase(incident));
     } catch (err) {
       await client.query("ROLLBACK");
@@ -234,5 +265,30 @@ incidentsRouter.patch(
     }
     publishIncidentEvent({ orgId: req.user!.orgId, type: "incident:updated", incident: toCamelCase(result.rows[0]) });
     res.json(toCamelCase(result.rows[0]));
+  })
+);
+
+// Phase 5: RAG triage suggestion for an incident. Returns { status: "pending" }
+// until the embed-and-suggest worker job has finished (which can take a
+// couple seconds for a real Gemini call, or a bit longer if it hit a retry).
+incidentsRouter.get(
+  "/:id/triage",
+  wrapAsync(async (req, res) => {
+    const incidentCheck = await pool.query(`SELECT id FROM incidents WHERE id = $1 AND org_id = $2`, [
+      req.params.id,
+      req.user!.orgId,
+    ]);
+    if (incidentCheck.rows.length === 0) {
+      return res.status(404).json({ error: "Incident not found" });
+    }
+
+    const result = await pool.query(
+      `SELECT summary, similar_incidents, created_at FROM triage_suggestions WHERE incident_id = $1`,
+      [req.params.id]
+    );
+    if (result.rows.length === 0) {
+      return res.json({ status: "pending" });
+    }
+    res.json(toCamelCase({ status: "ready", ...result.rows[0] }));
   })
 );

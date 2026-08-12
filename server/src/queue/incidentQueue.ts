@@ -25,7 +25,13 @@ export interface EscalationCheckJobData {
   step: number; // the step that was just paged — check if it's still unacked
 }
 
-export type IncidentJobData = PageJobData | EscalationCheckJobData;
+export interface EmbedAndSuggestJobData {
+  type: "embed-and-suggest";
+  incidentId: string;
+  orgId: string;
+}
+
+export type IncidentJobData = PageJobData | EscalationCheckJobData | EmbedAndSuggestJobData;
 
 export function enqueuePage(data: Omit<PageJobData, "type">) {
   // 3 attempts with exponential backoff — this is what actually exercises
@@ -43,5 +49,16 @@ export function enqueueEscalationCheck(data: Omit<EscalationCheckJobData, "type"
     "escalation-check",
     { type: "escalation-check", ...data },
     { delay: delayMs }
+  );
+}
+
+export function enqueueEmbedAndSuggest(data: Omit<EmbedAndSuggestJobData, "type">) {
+  // Gemini calls (or the mock's simulated latency) shouldn't hold up the
+  // incident-creation response any more than notification sends should —
+  // same reasoning as enqueuePage, different job.
+  return incidentQueue.add(
+    "embed-and-suggest",
+    { type: "embed-and-suggest", ...data },
+    { attempts: 2, backoff: { type: "exponential", delay: 3000 } }
   );
 }

@@ -1,4 +1,4 @@
-# PulseOps — Phase 1 + Phase 2 + Phase 3 + Phase 4
+# PulseOps — Phase 1 through Phase 5
 
 **Phase 1:** auth + orgs, manual on-call assignment, incident create/ack/resolve via
 REST, React dashboard.
@@ -10,33 +10,45 @@ every connected browser instantly via Socket.io + Redis pub/sub.
 per-person blackout dates, generate a fair rotation, get a violation report if the
 constraints couldn't be fully satisfied.
 
-**Phase 4 (this update):** event-driven reliability. Incident creation no longer sends
-notifications inline — it enqueues a BullMQ job, so the API responds immediately (fast
-201 for whatever monitoring tool is calling the webhook) while the actual paging work
-happens asynchronously in a separate worker process. If a page fails (simulated via a
-mock notification provider — see below), BullMQ retries it with exponential backoff.
-If it's not acknowledged within the escalation policy's timeout, the worker
-automatically pages the next person in the chain and logs every step on the
-incident's timeline.
+**Phase 4:** event-driven reliability — incident notifications run through a BullMQ
+queue in a separate worker process, with retry-with-backoff and automatic escalation
+through a policy chain if a page goes unacknowledged. Notifications are mocked (see
+Phase 4 notes below) so the retry/escalation logic is real and demoable without
+fighting Twilio.
 
-**Why a mock notification provider instead of real Twilio/SendGrid:** Twilio's trial
-signup has gotten inconsistent about issuing free numbers depending on account/region,
-and burning time fighting that isn't worth it for a portfolio project — the thing that
-actually matters for the "hard problem" story is the retry/escalation *architecture*,
-not whether a real SMS hits a phone. `server/src/notifications/` defines a
-`NotificationProvider` interface; `MockNotificationProvider` logs to stdout instead of
-calling a real API, and can be configured to fail on purpose
-(`NOTIFICATION_SIMULATE_FAILURES=true`) so you can actually watch the retry/backoff
-happen instead of just trusting it works. Swapping in a real provider later is a
-one-line change in `notifications/index.ts` — nothing about the queue or escalation
-logic needs to change.
+**Phase 5 (this update):** RAG-based incident triage. When a new incident fires, its
+title + description get embedded and stored in `pgvector`; a cosine-similarity search
+finds the most similar past *resolved* incidents (and pulls in whatever resolution
+notes were recorded on them); an LLM generates a short, explicitly-grounded summary —
+instructed to use only the retrieved incidents, not invent anything — with the exact
+incidents it drew from shown as clickable citations in the UI. This runs as a
+background queue job so it never blocks incident creation, and updates live over the
+same WebSocket connection used everywhere else.
+
+**Why Gemini (and not a mock, unlike Phase 4's Twilio situation):** a Gemini API key
+is genuinely free with no phone verification or billing setup — just a Google account
+via [aistudio.google.com/apikey](https://aistudio.google.com/apikey) — so there's no
+reason to avoid the real thing here. That said, the same swappable-provider pattern
+from Phase 4 still applies: `server/src/ai/` defines `EmbeddingProvider` and
+`GenerationProvider` interfaces, with real Gemini implementations *and* mock
+implementations (deterministic bag-of-words embeddings, template-based summaries)
+that require no API key at all. If `GEMINI_API_KEY` isn't set, the app automatically
+falls back to the mocks and logs that it's doing so — the whole pipeline (embed →
+store → similarity search → generate → cite) is demoable and testable without ever
+touching Gemini.
 
 Verified in this scaffold: `server` and `client` typecheck clean, the client builds
-with Vite, both the API server and the worker process boot cleanly (including with
-Redis unavailable), and the mock provider's simulated-failure rate was tested directly
-(30 calls with `NOTIFICATION_SIMULATE_FAILURES=true` produced a realistic mix of
-successes/failures). Not yet run end-to-end through the actual UI with Docker up —
-do that first before building on top of it.
+with Vite, both the API server and worker boot cleanly (including with Redis
+unavailable), and — since I can't reach the real Gemini API from this sandbox
+environment — the **mock** embedding and generation providers were tested directly:
+confirmed the mock embedder scores two incidents about the same underlying problem
+(described in different words) as meaningfully more similar to each other than to an
+unrelated incident, and confirmed the mock generator produces a properly grounded,
+clearly-labeled summary citing the resolution notes it was given. The real Gemini
+providers were written carefully against the documented API shapes but **have not
+been run against the live API** — verify them once you add a real key, and check
+[ai.google.dev/gemini-api/docs/models](https://ai.google.dev/gemini-api/docs/models)
+if the default model names have changed since this was written.
 
 ## Project layout
 
@@ -45,14 +57,15 @@ pulseops/
 ├── packages/shared-types/   # Types shared by server and client — the wire format
 ├── server/                  # Express + TypeScript API
 │   └── src/
-│       ├── db/               # pg pool, SQL migrations, migration runner
-│       ├── middleware/       # requireAuth, requireRole, error handling
-│       ├── notifications/    # NotificationProvider interface + mock implementation
-│       ├── queue/            # BullMQ queue definition + the worker process
-│       ├── realtime/         # Socket.io server + Redis pub/sub fan-out
-│       ├── routes/           # auth, orgs, users, schedules, incidents, escalation policies
-│       ├── scheduling/       # the constraint-based rotation generator
-│       └── utils/            # password hashing, JWT signing, snake_case→camelCase
+│       ├── ai/                # Phase 5: embedding + generation providers (Gemini + mock)
+│       ├── db/                # pg pool, SQL migrations, migration runner, vector helper
+│       ├── middleware/        # requireAuth, requireRole, error handling
+│       ├── notifications/     # NotificationProvider interface + mock implementation
+│       ├── queue/             # BullMQ queue definition + the worker process
+│       ├── realtime/          # Socket.io server + Redis pub/sub fan-out
+│       ├── routes/            # auth, orgs, users, schedules, incidents, escalation policies
+│       ├── scheduling/        # the constraint-based rotation generator
+│       └── utils/             # password hashing, JWT signing, snake_case→camelCase
 ├── client/                  # React + TypeScript + Vite
 │   └── src/
 │       ├── api/               # axios client with JWT interceptor
@@ -97,8 +110,9 @@ npm run migrate
 ```
 
 This runs `001_init.sql` (core schema), `002_schedule_members.sql` (Phase 3's
-roster table), and `003_escalation.sql` (Phase 4's `escalation_policy_id` +
-`current_escalation_step` columns on `incidents`) against `DATABASE_URL`.
+roster table), `003_escalation.sql` (Phase 4's escalation fields), and
+`004_triage.sql` (Phase 5's `triage_suggestions` table and the HNSW vector index)
+against `DATABASE_URL`.
 
 **5. Run the app**
 
@@ -185,6 +199,22 @@ curl -X POST http://localhost:4000/api/incidents \
   its 3 attempts, in which case BullMQ marks the job failed and the escalation timer
   for that step never got scheduled — a real gap, see "Known gaps" below)
 
+**9. Try the RAG triage flow**
+
+- Fire and resolve two or three incidents about the *same underlying problem*,
+  described in different words each time, and add a resolution note to each via the
+  incident detail page (or `POST /api/incidents/:id/notes`) before resolving —
+  something like "Restarted the connection pool and raised max_connections". This is
+  what gives the RAG grounding something real to cite.
+- Fire a new incident describing that same problem again
+- Open its detail page (click the incident title from the dashboard) — the **AI
+  triage suggestion** panel will show "Generating..." briefly, then populate with a
+  summary and the past incidents it drew from, each shown with a similarity score and
+  linking to that incident's own detail page
+- Without a `GEMINI_API_KEY` set, the summary will be clearly labeled
+  `[Mock AI summary]` — that's expected, not a bug; add a real key to
+  `server/.env` and restart the worker to see actual Gemini output instead
+
 
 
 The rotation generator (`server/src/scheduling/generateRotation.ts`) was verified
@@ -205,11 +235,14 @@ dates, or a roster of one against a long window) that's worth locking down.
 
 ## What's deliberately not here yet
 
-- **AI layer** (Phase 5): `embedding_vector` column exists and is unused; no
-  embeddings, no similarity search, no triage suggestions.
-- **Observability + load test** (Phase 6) and all Phase 7 stretch features.
+- **Observability + load test** (Phase 6): no structured logging beyond console.log,
+  no OpenTelemetry tracing, no `/metrics` endpoint, no k6 script.
+- **Phase 7 stretch features**: AI-generated postmortems (this would reuse the same
+  `generationProvider` from Phase 5, prompted with the full incident timeline instead
+  of similar-incident context), on-call fatigue analytics, a public status page,
+  SLA/error-budget tracking.
 
-## Known gaps to fix before Phase 5
+## Known gaps to fix before Phase 6
 
 - No refresh-token flow — the JWT is a flat 7-day token. Fine for a demo, worth
   revisiting if this goes further.
@@ -230,3 +263,17 @@ dates, or a roster of one against a long window) that's worth locking down.
   relying on this for anything beyond a demo.
 - Notifications are entirely mocked (see the Phase 4 section above) — no real
   Twilio/SendGrid wiring exists yet, by deliberate choice.
+- The real Gemini providers (`GeminiEmbeddingProvider`, `GeminiGenerationProvider`)
+  were written against the documented API request/response shapes but have not been
+  exercised against the live API from this environment — verify them with a real key
+  before relying on them, and double-check the default model names
+  (`text-embedding-004`, `gemini-2.0-flash`) are still current.
+- The incident embedding is generated once, from title + description at creation
+  time, and never re-embedded even after resolution notes are added. A more complete
+  RAG implementation would re-embed (or embed separately) the resolution notes too,
+  since "what actually fixed it" is arguably more useful to match on than the
+  original symptom description — worth revisiting if triage quality feels shallow.
+- Similarity search only looks at `status = 'resolved'` incidents within the same
+  org — reasonable for real usage (an org's own history), but means a fresh org
+  with no resolved incidents yet will always get an empty "similar incidents" list,
+  which is expected, not broken.

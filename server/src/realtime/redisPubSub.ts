@@ -19,11 +19,9 @@ subscriber.on("error", (err) => console.error("Redis subscriber error:", err.mes
 
 export const INCIDENT_EVENTS_CHANNEL = "pulseops:incident-events";
 
-export interface IncidentEventMessage {
-  orgId: string;
-  type: "incident:created" | "incident:updated";
-  incident: unknown;
-}
+export type IncidentEventMessage =
+  | { orgId: string; type: "incident:created" | "incident:updated"; incident: unknown }
+  | { orgId: string; type: "incident:triage-ready"; incidentId: string };
 
 export function publishIncidentEvent(msg: IncidentEventMessage) {
   return publisher.publish(INCIDENT_EVENTS_CHANNEL, JSON.stringify(msg));

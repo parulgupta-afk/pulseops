@@ -5,7 +5,9 @@ import { Worker, type Job } from "bullmq";
 import { bullConnection } from "./connection";
 import { INCIDENT_QUEUE_NAME, enqueueEscalationCheck, type IncidentJobData } from "./incidentQueue";
 import { pool } from "../db/pool";
+import { toVectorLiteral } from "../db/vector";
 import { notificationProvider } from "../notifications";
+import { embeddingProvider, generationProvider, type SimilarIncidentContext } from "../ai";
 import { publishIncidentEvent } from "../realtime/redisPubSub";
 import { toCamelCase } from "../utils/caseConvert";
 
@@ -118,6 +120,77 @@ async function handleEscalationCheck(incidentId: string, orgId: string, step: nu
   }
 }
 
+const SIMILARITY_LIMIT = 3;
+
+// The actual RAG pipeline: embed the new incident, find the most similar
+// past *resolved* incidents via pgvector cosine distance, pull their
+// resolution notes for grounding, and ask the generation provider for a
+// summary — explicitly instructed to use only what was retrieved, not invent
+// anything. Runs as a queue job so a slow/flaky Gemini call never blocks the
+// incident-creation response.
+async function embedAndSuggest(incidentId: string, orgId: string) {
+  const incidentResult = await pool.query(
+    `SELECT id, title, description FROM incidents WHERE id = $1 AND org_id = $2`,
+    [incidentId, orgId]
+  );
+  const incident = incidentResult.rows[0];
+  if (!incident) return;
+
+  // Embed on title+description — deliberately not re-run on resolution, so
+  // the embedding reflects "what the incident looked like when it fired,"
+  // which is what a *new* incident's description will actually resemble.
+  const embedding = await embeddingProvider.embed(`${incident.title}\n${incident.description}`);
+  await pool.query(`UPDATE incidents SET embedding_vector = $1::vector WHERE id = $2`, [
+    toVectorLiteral(embedding),
+    incidentId,
+  ]);
+
+  const similarResult = await pool.query(
+    `SELECT id, title, description, resolved_at, embedding_vector <=> $1::vector AS distance
+     FROM incidents
+     WHERE org_id = $2 AND status = 'resolved' AND id != $3 AND embedding_vector IS NOT NULL
+     ORDER BY distance ASC
+     LIMIT $4`,
+    [toVectorLiteral(embedding), orgId, incidentId, SIMILARITY_LIMIT]
+  );
+
+  const similarIncidents = [];
+  const contexts: SimilarIncidentContext[] = [];
+
+  for (const row of similarResult.rows) {
+    const notesResult = await pool.query(
+      `SELECT message FROM incident_events
+       WHERE incident_id = $1 AND type IN ('note', 'resolved') AND message IS NOT NULL`,
+      [row.id]
+    );
+    const resolutionNotes = notesResult.rows.map((r) => r.message).filter(Boolean);
+
+    contexts.push({ title: row.title, description: row.description, resolutionNotes });
+    similarIncidents.push({
+      incidentId: row.id,
+      title: row.title,
+      // Cosine distance is 0 (identical) to 2 (opposite); convert to a
+      // 0-1 "similarity" score, which reads more intuitively in the UI.
+      similarity: Math.max(0, 1 - row.distance / 2),
+      resolvedAt: row.resolved_at,
+    });
+  }
+
+  const summary = await generationProvider.summarize(
+    { title: incident.title, description: incident.description },
+    contexts
+  );
+
+  await pool.query(
+    `INSERT INTO triage_suggestions (incident_id, summary, similar_incidents)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (incident_id) DO UPDATE SET summary = $2, similar_incidents = $3, created_at = now()`,
+    [incidentId, summary, JSON.stringify(similarIncidents)]
+  );
+
+  publishIncidentEvent({ orgId, type: "incident:triage-ready", incidentId });
+}
+
 export const incidentWorker = new Worker<IncidentJobData>(
   INCIDENT_QUEUE_NAME,
   async (job: Job<IncidentJobData>) => {
@@ -125,6 +198,8 @@ export const incidentWorker = new Worker<IncidentJobData>(
       await pageStep(job.data.incidentId, job.data.orgId, job.data.step);
     } else if (job.data.type === "escalation-check") {
       await handleEscalationCheck(job.data.incidentId, job.data.orgId, job.data.step);
+    } else if (job.data.type === "embed-and-suggest") {
+      await embedAndSuggest(job.data.incidentId, job.data.orgId);
     }
   },
   { connection: bullConnection }

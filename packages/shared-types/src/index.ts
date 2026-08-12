@@ -150,6 +150,24 @@ export interface GenerateRotationResponse {
   fairnessReport: FairnessReportEntry[];
 }
 
+// ---- Phase 5: RAG-based incident triage ----
+
+export interface SimilarIncidentSummary {
+  incidentId: string;
+  title: string;
+  similarity: number; // 0-1, higher = more similar
+  resolvedAt: string | null;
+}
+
+export type TriageSuggestion =
+  | { status: "pending" }
+  | {
+      status: "ready";
+      summary: string;
+      similarIncidents: SimilarIncidentSummary[];
+      createdAt: string;
+    };
+
 // ---- API request/response shapes ----
 
 export interface LoginRequest {

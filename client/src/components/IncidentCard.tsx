@@ -1,3 +1,4 @@
+import { Link } from "react-router-dom";
 import type { Incident } from "@pulseops/shared-types";
 
 interface Props {
@@ -20,7 +21,9 @@ export function IncidentCard({ incident, onAcknowledge, onResolve }: Props) {
   return (
     <div className={`incident-card status-${incident.status}`}>
       <div className="incident-main">
-        <div className="incident-title">{incident.title}</div>
+        <Link to={`/incidents/${incident.id}`} className="incident-title" style={{ textDecoration: "none" }}>
+          {incident.title}
+        </Link>
         <div className="incident-meta">
           <span>fired {timeAgo(incident.firedAt)}</span>
           <span>key: {incident.idempotencyKey}</span>
