@@ -12,7 +12,7 @@ services:
       POSTGRES_PASSWORD: pulseops
       POSTGRES_DB: pulseops
     ports:
-      - "5432:5432"
+      - "5433:5432"
     volumes:
       - pulseops_pg_data:/var/lib/postgresql/data
 
