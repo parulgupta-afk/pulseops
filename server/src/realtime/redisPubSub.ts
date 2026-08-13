@@ -21,7 +21,8 @@ export const INCIDENT_EVENTS_CHANNEL = "pulseops:incident-events";
 
 export type IncidentEventMessage =
   | { orgId: string; type: "incident:created" | "incident:updated"; incident: unknown }
-  | { orgId: string; type: "incident:triage-ready"; incidentId: string };
+  | { orgId: string; type: "incident:triage-ready"; incidentId: string }
+  | { orgId: string; type: "incident:postmortem-ready"; incidentId: string };
 
 export function publishIncidentEvent(msg: IncidentEventMessage) {
   return publisher.publish(INCIDENT_EVENTS_CHANNEL, JSON.stringify(msg));

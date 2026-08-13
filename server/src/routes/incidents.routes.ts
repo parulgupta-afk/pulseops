@@ -6,7 +6,8 @@ import { wrapAsync } from "../middleware/errorHandler";
 import { toCamelCase } from "../utils/caseConvert";
 import { publishIncidentEvent } from "../realtime/redisPubSub";
 import { enqueuePage } from "../queue/incidentQueue";
-import { enqueueEmbedAndSuggest } from "../queue/incidentQueue";
+import { enqueueEmbedAndSuggest, enqueueGeneratePostmortem } from "../queue/incidentQueue";
+import { incidentsCreatedTotal, incidentIngestionDuration } from "../observability/metrics";
 
 export const incidentsRouter = Router();
 
@@ -106,6 +107,7 @@ const createIncidentSchema = z.object({
 incidentsRouter.post(
   "/",
   wrapAsync(async (req, res) => {
+    const endTimer = incidentIngestionDuration.startTimer();
     const body = createIncidentSchema.parse(req.body);
 
     // Idempotency: if this key was already used, return the existing incident
@@ -117,6 +119,7 @@ incidentsRouter.post(
       [req.user!.orgId, body.idempotencyKey]
     );
     if (existing.rows.length > 0) {
+      endTimer();
       return res.status(200).json(toCamelCase(existing.rows[0]));
     }
 
@@ -190,9 +193,12 @@ incidentsRouter.post(
       // paging config the way notifications are.
       await enqueueEmbedAndSuggest({ incidentId: incident.id, orgId: req.user!.orgId });
 
+      incidentsCreatedTotal.inc({ org_id: req.user!.orgId });
+      endTimer();
       res.status(201).json(toCamelCase(incident));
     } catch (err) {
       await client.query("ROLLBACK");
+      endTimer();
       throw err;
     } finally {
       client.release();
@@ -242,6 +248,10 @@ incidentsRouter.post(
       [req.params.id, req.user!.id]
     );
     publishIncidentEvent({ orgId: req.user!.orgId, type: "incident:updated", incident: toCamelCase(result.rows[0]) });
+    // Postmortem drafting needs the full event timeline, which is only
+    // meaningful once the incident is actually closed out — triggering here
+    // (not at creation, unlike the RAG embedding) is deliberate.
+    await enqueueGeneratePostmortem({ incidentId: req.params.id, orgId: req.user!.orgId });
     res.json(toCamelCase(result.rows[0]));
   })
 );
@@ -284,6 +294,30 @@ incidentsRouter.get(
 
     const result = await pool.query(
       `SELECT summary, similar_incidents, created_at FROM triage_suggestions WHERE incident_id = $1`,
+      [req.params.id]
+    );
+    if (result.rows.length === 0) {
+      return res.json({ status: "pending" });
+    }
+    res.json(toCamelCase({ status: "ready", ...result.rows[0] }));
+  })
+);
+
+// Phase 7: AI-drafted postmortem, generated automatically when an incident
+// is resolved. Same pending/ready pattern as the Phase 5 triage endpoint.
+incidentsRouter.get(
+  "/:id/postmortem",
+  wrapAsync(async (req, res) => {
+    const incidentCheck = await pool.query(`SELECT id FROM incidents WHERE id = $1 AND org_id = $2`, [
+      req.params.id,
+      req.user!.orgId,
+    ]);
+    if (incidentCheck.rows.length === 0) {
+      return res.status(404).json({ error: "Incident not found" });
+    }
+
+    const result = await pool.query(
+      `SELECT content, generated_by_ai, created_at FROM postmortems WHERE incident_id = $1`,
       [req.params.id]
     );
     if (result.rows.length === 0) {

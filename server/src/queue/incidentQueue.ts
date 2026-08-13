@@ -31,7 +31,13 @@ export interface EmbedAndSuggestJobData {
   orgId: string;
 }
 
-export type IncidentJobData = PageJobData | EscalationCheckJobData | EmbedAndSuggestJobData;
+export interface GeneratePostmortemJobData {
+  type: "generate-postmortem";
+  incidentId: string;
+  orgId: string;
+}
+
+export type IncidentJobData = PageJobData | EscalationCheckJobData | EmbedAndSuggestJobData | GeneratePostmortemJobData;
 
 export function enqueuePage(data: Omit<PageJobData, "type">) {
   // 3 attempts with exponential backoff — this is what actually exercises
@@ -59,6 +65,14 @@ export function enqueueEmbedAndSuggest(data: Omit<EmbedAndSuggestJobData, "type"
   return incidentQueue.add(
     "embed-and-suggest",
     { type: "embed-and-suggest", ...data },
+    { attempts: 2, backoff: { type: "exponential", delay: 3000 } }
+  );
+}
+
+export function enqueueGeneratePostmortem(data: Omit<GeneratePostmortemJobData, "type">) {
+  return incidentQueue.add(
+    "generate-postmortem",
+    { type: "generate-postmortem", ...data },
     { attempts: 2, backoff: { type: "exponential", delay: 3000 } }
   );
 }

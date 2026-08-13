@@ -168,6 +168,47 @@ export type TriageSuggestion =
       createdAt: string;
     };
 
+// ---- Phase 7: postmortems, fatigue analytics, SLA tracking, public status ----
+
+export type PostmortemResult =
+  | { status: "pending" }
+  | { status: "ready"; content: string; generatedByAi: boolean; createdAt: string };
+
+export interface FatigueReportEntry {
+  userId: string;
+  name: string;
+  totalPages: number;
+  weekendPages: number;
+  offHoursPages: number;
+  flagged: boolean;
+}
+
+export interface SlaReport {
+  windowDays: number;
+  targetPercent: number;
+  uptimePercent: number;
+  downtimeMinutes: number;
+  errorBudgetMinutes: number;
+  errorBudgetConsumedPercent: number;
+  incidentCount: number;
+}
+
+export interface PublicIncidentSummary {
+  id: string;
+  title: string;
+  description?: string;
+  status: IncidentStatus;
+  firedAt: string;
+  resolvedAt?: string | null;
+}
+
+export interface PublicStatusResponse {
+  orgName: string;
+  operational: boolean;
+  activeIncidents: PublicIncidentSummary[];
+  recentlyResolved: PublicIncidentSummary[];
+}
+
 // ---- API request/response shapes ----
 
 export interface LoginRequest {

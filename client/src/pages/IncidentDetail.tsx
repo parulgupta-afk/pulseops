@@ -3,7 +3,7 @@ import { useParams, Link } from "react-router-dom";
 import { Layout } from "../components/Layout";
 import { api } from "../api/client";
 import { getSocket } from "../api/socket";
-import type { Incident, IncidentEvent, TriageSuggestion } from "@pulseops/shared-types";
+import type { Incident, IncidentEvent, TriageSuggestion, PostmortemResult } from "@pulseops/shared-types";
 
 const EVENT_LABELS: Record<string, string> = {
   fired: "Fired",
@@ -19,6 +19,7 @@ export function IncidentDetail() {
   const [incident, setIncident] = useState<Incident | null>(null);
   const [events, setEvents] = useState<IncidentEvent[]>([]);
   const [triage, setTriage] = useState<TriageSuggestion | null>(null);
+  const [postmortem, setPostmortem] = useState<PostmortemResult | null>(null);
   const [noteText, setNoteText] = useState("");
   const [submittingNote, setSubmittingNote] = useState(false);
 
@@ -27,6 +28,7 @@ export function IncidentDetail() {
     api.get<Incident>(`/incidents/${id}`).then(({ data }) => setIncident(data));
     api.get<IncidentEvent[]>(`/incidents/${id}/events`).then(({ data }) => setEvents(data));
     api.get<TriageSuggestion>(`/incidents/${id}/triage`).then(({ data }) => setTriage(data));
+    api.get<PostmortemResult>(`/incidents/${id}/postmortem`).then(({ data }) => setPostmortem(data));
   }, [id]);
 
   useEffect(() => {
@@ -51,12 +53,19 @@ export function IncidentDetail() {
         api.get<TriageSuggestion>(`/incidents/${id}/triage`).then(({ data }) => setTriage(data));
       }
     };
+    const onPostmortemReady = (payload: { incidentId: string }) => {
+      if (payload.incidentId === id) {
+        api.get<PostmortemResult>(`/incidents/${id}/postmortem`).then(({ data }) => setPostmortem(data));
+      }
+    };
 
     socket.on("incident:updated", onUpdated);
     socket.on("incident:triage-ready", onTriageReady);
+    socket.on("incident:postmortem-ready", onPostmortemReady);
     return () => {
       socket.off("incident:updated", onUpdated);
       socket.off("incident:triage-ready", onTriageReady);
+      socket.off("incident:postmortem-ready", onPostmortemReady);
     };
   }, [id]);
 
@@ -149,6 +158,33 @@ export function IncidentDetail() {
           </>
         )}
       </section>
+
+      {incident.status === "resolved" && (
+        <section className="panel">
+          <h2 className="panel-title">Postmortem</h2>
+          <p className="panel-subtitle">
+            Auto-drafted from this incident's event timeline when it was resolved — grounded only in what's recorded
+            below, not invented.
+          </p>
+          {!postmortem || postmortem.status === "pending" ? (
+            <p style={{ color: "var(--text-muted)", fontSize: 13 }}>
+              Drafting... this runs in the background and usually takes a few seconds.
+            </p>
+          ) : (
+            <pre
+              style={{
+                whiteSpace: "pre-wrap",
+                fontFamily: "var(--font-body)",
+                fontSize: 13,
+                lineHeight: 1.6,
+                margin: 0,
+              }}
+            >
+              {postmortem.content}
+            </pre>
+          )}
+        </section>
+      )}
 
       <section className="panel">
         <h2 className="panel-title">Timeline</h2>

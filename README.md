@@ -1,10 +1,14 @@
-# PulseOps — Phase 1 through Phase 5
+# PulseOps — All 7 Phases Complete
+
+A scoped-down on-call incident management platform (PagerDuty/Opsgenie-style),
+built in phases to demonstrate real-time systems, a genuine constraint-satisfaction
+algorithm, event-driven infrastructure, and applied RAG — not just CRUD.
 
 **Phase 1:** auth + orgs, manual on-call assignment, incident create/ack/resolve via
 REST, React dashboard.
 
-**Phase 2:** the dashboard no longer polls — every incident state change is pushed to
-every connected browser instantly via Socket.io + Redis pub/sub.
+**Phase 2:** real-time — every incident state change pushed to every connected
+browser instantly via Socket.io + Redis pub/sub, no polling.
 
 **Phase 3:** the constraint-based on-call rotation generator — build a roster with
 per-person blackout dates, generate a fair rotation, get a violation report if the
@@ -12,43 +16,41 @@ constraints couldn't be fully satisfied.
 
 **Phase 4:** event-driven reliability — incident notifications run through a BullMQ
 queue in a separate worker process, with retry-with-backoff and automatic escalation
-through a policy chain if a page goes unacknowledged. Notifications are mocked (see
-Phase 4 notes below) so the retry/escalation logic is real and demoable without
-fighting Twilio.
+through a policy chain if a page goes unacknowledged.
 
-**Phase 5 (this update):** RAG-based incident triage. When a new incident fires, its
-title + description get embedded and stored in `pgvector`; a cosine-similarity search
-finds the most similar past *resolved* incidents (and pulls in whatever resolution
-notes were recorded on them); an LLM generates a short, explicitly-grounded summary —
-instructed to use only the retrieved incidents, not invent anything — with the exact
-incidents it drew from shown as clickable citations in the UI. This runs as a
-background queue job so it never blocks incident creation, and updates live over the
-same WebSocket connection used everywhere else.
+**Phase 5:** RAG-based incident triage — new incidents get embedded via Gemini
+(or a mock, if no API key is set) and matched against similar past resolved
+incidents via pgvector, with an AI summary grounded explicitly in what was retrieved.
 
-**Why Gemini (and not a mock, unlike Phase 4's Twilio situation):** a Gemini API key
-is genuinely free with no phone verification or billing setup — just a Google account
-via [aistudio.google.com/apikey](https://aistudio.google.com/apikey) — so there's no
-reason to avoid the real thing here. That said, the same swappable-provider pattern
-from Phase 4 still applies: `server/src/ai/` defines `EmbeddingProvider` and
-`GenerationProvider` interfaces, with real Gemini implementations *and* mock
-implementations (deterministic bag-of-words embeddings, template-based summaries)
-that require no API key at all. If `GEMINI_API_KEY` isn't set, the app automatically
-falls back to the mocks and logs that it's doing so — the whole pipeline (embed →
-store → similarity search → generate → cite) is demoable and testable without ever
-touching Gemini.
+**Phase 6 (this update):** observability. Structured logging via pino, OpenTelemetry
+tracing (HTTP/Express/pg instrumentation), and a `/metrics` endpoint exposing
+Prometheus-format metrics — including one tied directly to the spec's non-functional
+requirement (`incident_ingestion_duration_seconds`, p95 target < 200ms). A k6 load
+test script targets the incident ingestion endpoint specifically.
+
+**Phase 7 (this update):** all four stretch features, in the spec's priority order:
+1. **AI-generated postmortems** — drafted automatically when an incident is resolved,
+   grounded in its full event timeline, reusing the same Gemini/mock generation
+   provider from Phase 5.
+2. **On-call fatigue analytics** — flags responders paged excessively or
+   disproportionately on weekends/off-hours.
+3. **Public status page** — an unauthenticated, no-login page at `/status/:orgId`
+   showing current + recently-resolved incidents, the kind of page a customer would
+   actually see.
+4. **SLA / error-budget tracking** — uptime percentage and error-budget burn-rate
+   over a configurable window, computed from actual incident open/close times.
 
 Verified in this scaffold: `server` and `client` typecheck clean, the client builds
-with Vite, both the API server and worker boot cleanly (including with Redis
-unavailable), and — since I can't reach the real Gemini API from this sandbox
-environment — the **mock** embedding and generation providers were tested directly:
-confirmed the mock embedder scores two incidents about the same underlying problem
-(described in different words) as meaningfully more similar to each other than to an
-unrelated incident, and confirmed the mock generator produces a properly grounded,
-clearly-labeled summary citing the resolution notes it was given. The real Gemini
-providers were written carefully against the documented API shapes but **have not
-been run against the live API** — verify them once you add a real key, and check
-[ai.google.dev/gemini-api/docs/models](https://ai.google.dev/gemini-api/docs/models)
-if the default model names have changed since this was written.
+with Vite, both the API server and worker boot cleanly with the full Phase 1–7 stack
+wired together (including with Redis unavailable). `/metrics` and `/health` were
+fetched from a genuinely running server instance and confirmed to return real,
+correctly-shaped responses. The SLA computation (`server/src/analytics/sla.ts`) was
+tested directly with 4 assertions, including the trickiest edge case — correctly
+merging overlapping incident windows so simultaneous incidents don't double-count as
+downtime. The k6 script and the real Gemini API calls could not be executed from this
+sandbox environment (no k6 binary, no network access to Gemini's API, no live
+Postgres) — see the relevant sections below for what that means for you before
+relying on either.
 
 ## Project layout
 
@@ -57,22 +59,28 @@ pulseops/
 ├── packages/shared-types/   # Types shared by server and client — the wire format
 ├── server/                  # Express + TypeScript API
 │   └── src/
-│       ├── ai/                # Phase 5: embedding + generation providers (Gemini + mock)
+│       ├── ai/                # embedding + generation providers (Gemini + mock)
+│       ├── analytics/         # pure SLA/error-budget computation (unit-tested)
 │       ├── db/                # pg pool, SQL migrations, migration runner, vector helper
-│       ├── middleware/        # requireAuth, requireRole, error handling
+│       ├── middleware/        # requireAuth, requireRole, error handling, metrics
 │       ├── notifications/     # NotificationProvider interface + mock implementation
+│       ├── observability/     # prom-client metrics registry
 │       ├── queue/             # BullMQ queue definition + the worker process
 │       ├── realtime/          # Socket.io server + Redis pub/sub fan-out
-│       ├── routes/            # auth, orgs, users, schedules, incidents, escalation policies
+│       ├── routes/            # auth, orgs, users, schedules, incidents, escalation
+│       │                        policies, analytics, public status
 │       ├── scheduling/        # the constraint-based rotation generator
-│       └── utils/             # password hashing, JWT signing, snake_case→camelCase
+│       ├── tracing.ts         # OpenTelemetry bootstrap — imported first in every entrypoint
+│       └── utils/             # password hashing, JWT signing, snake_case→camelCase, logger
 ├── client/                  # React + TypeScript + Vite
 │   └── src/
-│       ├── api/               # axios client with JWT interceptor
-│       ├── context/           # AuthContext
-│       ├── pages/             # Login, Register, Dashboard, Schedule
-│       └── components/        # Layout, IncidentCard
-└── docker-compose.yml        # Postgres (with pgvector) + Redis for local dev
+│       ├── api/                # axios client with JWT interceptor, socket.io connection
+│       ├── context/            # AuthContext
+│       ├── pages/               # Login, Register, Dashboard, Schedule, EscalationPolicies,
+│       │                          IncidentDetail, Analytics, PublicStatus
+│       └── components/          # Layout, IncidentCard
+├── k6/                       # load test script targeting incident ingestion
+└── docker-compose.yml         # Postgres (with pgvector) + Redis for local dev
 ```
 
 ## Setup
@@ -109,10 +117,11 @@ anywhere real.
 npm run migrate
 ```
 
-This runs `001_init.sql` (core schema), `002_schedule_members.sql` (Phase 3's
-roster table), `003_escalation.sql` (Phase 4's escalation fields), and
-`004_triage.sql` (Phase 5's `triage_suggestions` table and the HNSW vector index)
-against `DATABASE_URL`.
+This runs all five migrations in order: `001_init.sql` (core schema), `002` (Phase
+3's roster table), `003` (Phase 4's escalation fields), `004` (Phase 5's
+`triage_suggestions` table + vector index), and `005` (Phase 7's `target_user_id`
+on incident events + the unique index that makes postmortems regenerable) against
+`DATABASE_URL`.
 
 **5. Run the app**
 
@@ -215,6 +224,52 @@ curl -X POST http://localhost:4000/api/incidents \
   `[Mock AI summary]` — that's expected, not a bug; add a real key to
   `server/.env` and restart the worker to see actual Gemini output instead
 
+**10. Check observability**
+
+- Open `http://localhost:4000/metrics` directly in a browser — you'll see
+  Prometheus-format text output: default Node process metrics (CPU, memory, event
+  loop lag) plus the custom ones defined in `server/src/observability/metrics.ts`
+  (`http_request_duration_seconds`, `incidents_created_total`,
+  `incident_ingestion_duration_seconds`). Fire a few test incidents first so
+  there's actually data in the histograms.
+- Watch the terminal running `npm run dev:server` — every request logs a structured
+  line via pino (pretty-printed in dev; set `NODE_ENV=production` to see raw JSON,
+  which is what you'd actually ship to a log aggregator)
+- OpenTelemetry spans print to the console too (via `ConsoleSpanExporter` in
+  `server/src/tracing.ts`) — look for `HTTP GET`, `express.handle`, and `pg.query`
+  spans as you hit different endpoints. To send these somewhere real instead of the
+  console, swap in the OTLP exporter and point `OTEL_EXPORTER_OTLP_ENDPOINT` at a
+  Jaeger/Tempo/Grafana Cloud collector.
+- To actually run the k6 load test, [install k6](https://k6.io/docs/get-started/installation/)
+  separately (it's not an npm package), then:
+  ```bash
+  PULSEOPS_EMAIL=you@example.com PULSEOPS_PASSWORD=yourpassword \
+    k6 run k6/incident-ingestion.js
+  ```
+  This ramps to 500 concurrent virtual users hitting `POST /api/incidents` and
+  fails the run if p95 latency exceeds 200ms — the exact number from the spec's
+  non-functional requirement. **I could not run this myself** — no k6 binary in
+  the environment this was built in — so the first real run is yours; if it fails
+  the threshold, `incident_ingestion_duration_seconds` in `/metrics` (or the
+  OTel `pg.query` spans) is the place to look for where the time is actually going.
+
+**11. Try the Phase 7 stretch features**
+
+- **Postmortems**: resolve any incident with a couple of notes already recorded —
+  its detail page will show a **Postmortem** section that populates automatically
+  a few seconds after resolving (or shows `[Mock AI postmortem]` without a Gemini key)
+- **Fatigue analytics**: after firing a handful of incidents through an escalation
+  policy (so `target_user_id` gets recorded on `paged`/`escalated` events), visit
+  **Analytics** in the nav — the fatigue table shows who's been paged, and flags
+  anyone paged 5+ times where over half those pages landed on a weekend or outside
+  8am–8pm UTC
+- **SLA tracking**: same Analytics page, top section — adjust the window/target
+  inputs and watch the uptime %, downtime, and error-budget bar update
+- **Public status page**: click "View public status page" at the bottom of the
+  sidebar (opens `/status/<your org id>` in a new tab) — no login required, this is
+  what an external stakeholder would actually see. Fire an incident and refresh to
+  see it appear as a degradation.
+
 
 
 The rotation generator (`server/src/scheduling/generateRotation.ts`) was verified
@@ -233,16 +288,13 @@ worth adding if you want CI to catch regressions here, since this is the piece m
 likely to have an edge case (e.g. very large gaps between roster members' blackout
 dates, or a roster of one against a long window) that's worth locking down.
 
-## What's deliberately not here yet
+## What's not production-ready (by deliberate scope, not oversight)
 
-- **Observability + load test** (Phase 6): no structured logging beyond console.log,
-  no OpenTelemetry tracing, no `/metrics` endpoint, no k6 script.
-- **Phase 7 stretch features**: AI-generated postmortems (this would reuse the same
-  `generationProvider` from Phase 5, prompted with the full incident timeline instead
-  of similar-incident context), on-call fatigue analytics, a public status page,
-  SLA/error-budget tracking.
+All 7 planned phases are built. What's still missing is the gap between "portfolio
+project that demonstrates the concepts" and "thing you'd actually run in production" —
+covered honestly in "Known gaps" below rather than glossed over.
 
-## Known gaps to fix before Phase 6
+## Known gaps
 
 - No refresh-token flow — the JWT is a flat 7-day token. Fine for a demo, worth
   revisiting if this goes further.
@@ -258,9 +310,7 @@ dates, or a roster of one against a long window) that's worth locking down.
   enqueued *after* a successful send, inside `pageStep()`. So a permanently-failing
   notification currently silently stalls the escalation chain instead of moving on
   to the next step. The honest fix is to schedule the escalation-check independently
-  of send success (e.g. right when the step starts, not after it's confirmed sent),
-  so a dead notification channel doesn't block the whole chain — worth doing before
-  relying on this for anything beyond a demo.
+  of send success, so a dead notification channel doesn't block the whole chain.
 - Notifications are entirely mocked (see the Phase 4 section above) — no real
   Twilio/SendGrid wiring exists yet, by deliberate choice.
 - The real Gemini providers (`GeminiEmbeddingProvider`, `GeminiGenerationProvider`)
@@ -272,8 +322,33 @@ dates, or a roster of one against a long window) that's worth locking down.
   time, and never re-embedded even after resolution notes are added. A more complete
   RAG implementation would re-embed (or embed separately) the resolution notes too,
   since "what actually fixed it" is arguably more useful to match on than the
-  original symptom description — worth revisiting if triage quality feels shallow.
+  original symptom description.
 - Similarity search only looks at `status = 'resolved'` incidents within the same
   org — reasonable for real usage (an org's own history), but means a fresh org
   with no resolved incidents yet will always get an empty "similar incidents" list,
   which is expected, not broken.
+- `/metrics` is unauthenticated by design (standard Prometheus convention), which
+  means in a real deployment it needs network-level protection (private subnet,
+  firewall rule), not app-level auth — worth calling out explicitly if this comes up
+  in an interview, since leaving a metrics endpoint open on the public internet is a
+  real (if minor) information-disclosure mistake people make.
+- OpenTelemetry exports to the console (`ConsoleSpanExporter`) rather than a real
+  collector — functionally complete for demonstrating the instrumentation is wired
+  correctly, but you'd swap in the OTLP exporter before this traces anywhere useful
+  in production.
+- The k6 load test script was written carefully against the documented k6 API but
+  **has not been executed** — no k6 binary in the environment this was built in.
+  Run it yourself before quoting any throughput/latency numbers from it in an
+  interview or on a resume; don't claim a number you haven't actually seen k6 produce.
+- Fatigue analytics' "off-hours" definition (before 8am / after 8pm UTC) isn't
+  timezone-aware — it treats every responder as if they're in UTC, which is wrong
+  for a distributed team. A real implementation would need a timezone field on
+  `users` and compute off-hours relative to each person's own local time.
+- SLA/error-budget tracking treats the whole org as a single service — any incident
+  counts as full downtime for the entire measurement window, with no concept of
+  partial degradation or multiple independently-tracked services. Reasonable
+  simplification given the data model has no "Service" entity; a fuller
+  implementation would need one.
+- The public status page has no rate limiting — since it's intentionally
+  unauthenticated, that's a real DoS surface in a production deployment that this
+  project doesn't address.

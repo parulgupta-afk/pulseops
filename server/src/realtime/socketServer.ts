@@ -46,7 +46,7 @@ export function initSocketServer(httpServer: HttpServer) {
     } catch {
       return;
     }
-    if (msg.type === "incident:triage-ready") {
+    if (msg.type === "incident:triage-ready" || msg.type === "incident:postmortem-ready") {
       io.to(`org:${msg.orgId}`).emit(msg.type, { incidentId: msg.incidentId });
     } else {
       io.to(`org:${msg.orgId}`).emit(msg.type, msg.incident);

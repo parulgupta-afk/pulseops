@@ -4,8 +4,18 @@ export interface SimilarIncidentContext {
   resolutionNotes: string[]; // messages from 'note'/'resolved' IncidentEvents
 }
 
+export interface TimelineEventContext {
+  type: string;
+  message: string | null;
+  timestamp: string;
+}
+
 export interface GenerationProvider {
   summarize(newIncident: { title: string; description: string }, similar: SimilarIncidentContext[]): Promise<string>;
+  draftPostmortem(
+    incident: { title: string; description: string },
+    events: TimelineEventContext[]
+  ): Promise<string>;
 }
 
 export class GeminiGenerationProvider implements GenerationProvider {
@@ -57,6 +67,42 @@ ${context}`;
     }
     return text.trim();
   }
+
+  async draftPostmortem(
+    incident: { title: string; description: string },
+    events: TimelineEventContext[]
+  ): Promise<string> {
+    const timeline = events
+      .map((e) => `[${e.timestamp}] ${e.type}${e.message ? `: ${e.message}` : ""}`)
+      .join("\n");
+
+    const prompt = `Write a brief blameless postmortem for the incident below, using ONLY the timeline provided — do not invent details, root causes, or fixes that aren't reflected in the events. Structure it with three short sections: "Summary", "Timeline", and "Root cause & follow-ups" (if the timeline doesn't clearly indicate a root cause or fix, say so plainly rather than guessing).
+
+Incident: "${incident.title}"
+Description: ${incident.description}
+
+Timeline:
+${timeline}`;
+
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${this.model}:generateContent?key=${this.apiKey}`;
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
+    });
+
+    if (!res.ok) {
+      const body = await res.text();
+      throw new Error(`Gemini generation request failed (${res.status}): ${body}`);
+    }
+
+    const postmortemData = await res.json();
+    const postmortemText = postmortemData?.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (typeof postmortemText !== "string") {
+      throw new Error("Gemini generation response missing candidates[0].content.parts[0].text");
+    }
+    return postmortemText.trim();
+  }
 }
 
 // Template-based, no API key needed. Deliberately labeled as a mock in its
@@ -76,5 +122,33 @@ export class MockGenerationProvider implements GenerationProvider {
         ? ` Past resolution notes mentioned: ${notes.join("; ")}.`
         : " No resolution notes were recorded on those incidents.";
     return `[Mock AI summary] "${newIncident.title}" resembles ${similar.length} past incident(s): ${titles}.${notesText} Review their event timelines for the exact steps taken.`;
+  }
+
+  async draftPostmortem(
+    incident: { title: string; description: string },
+    events: TimelineEventContext[]
+  ): Promise<string> {
+    const notes = events.filter((e) => e.type === "note" && e.message).map((e) => e.message as string);
+    const fired = events.find((e) => e.type === "fired");
+    const resolved = events.find((e) => e.type === "resolved");
+    const durationText =
+      fired && resolved
+        ? `${Math.round((new Date(resolved.timestamp).getTime() - new Date(fired.timestamp).getTime()) / 60000)} minutes`
+        : "unknown duration";
+
+    return [
+      "[Mock AI postmortem]",
+      "",
+      "## Summary",
+      `"${incident.title}" was open for approximately ${durationText}, based on the recorded timeline.`,
+      "",
+      "## Timeline",
+      events.map((e) => `- ${e.type}${e.message ? `: ${e.message}` : ""} (${e.timestamp})`).join("\n"),
+      "",
+      "## Root cause & follow-ups",
+      notes.length > 0
+        ? `Based on recorded notes: ${notes.join("; ")}.`
+        : "No resolution notes were recorded on this incident, so a root cause can't be determined from the timeline alone.",
+    ].join("\n");
   }
 }

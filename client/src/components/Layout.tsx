@@ -28,10 +28,23 @@ export function Layout({ children }: { children: ReactNode }) {
           <NavLink to="/escalation-policies" className={({ isActive }) => `nav-link${isActive ? " active" : ""}`}>
             Escalation policies
           </NavLink>
+          <NavLink to="/analytics" className={({ isActive }) => `nav-link${isActive ? " active" : ""}`}>
+            Analytics
+          </NavLink>
         </nav>
         <div className="sidebar-footer">
           <div>{user?.email}</div>
           <div style={{ textTransform: "capitalize" }}>{user?.role}</div>
+          {user?.orgId && (
+            <a
+              href={`/status/${user.orgId}`}
+              target="_blank"
+              rel="noreferrer"
+              style={{ display: "block", fontSize: 12, color: "var(--accent)", marginTop: 8 }}
+            >
+              View public status page →
+            </a>
+          )}
           <button className="logout-btn" onClick={handleLogout}>Sign out</button>
         </div>
       </aside>

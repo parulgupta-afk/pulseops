@@ -1,3 +1,5 @@
+import "../tracing"; // must be first — see comment in tracing.ts
+
 import dotenv from "dotenv";
 dotenv.config();
 
@@ -10,6 +12,7 @@ import { notificationProvider } from "../notifications";
 import { embeddingProvider, generationProvider, type SimilarIncidentContext } from "../ai";
 import { publishIncidentEvent } from "../realtime/redisPubSub";
 import { toCamelCase } from "../utils/caseConvert";
+import { logger } from "../utils/logger";
 
 // Runs as its own process (`npm run dev:worker`), separate from the API
 // server. This is the actual "worker picks it up, resolves who's on-call,
@@ -41,10 +44,16 @@ async function getUser(userId: string) {
   return result.rows[0] ?? null;
 }
 
-async function recordEventAndBroadcast(incidentId: string, orgId: string, type: string, message: string) {
+async function recordEventAndBroadcast(
+  incidentId: string,
+  orgId: string,
+  type: string,
+  message: string,
+  targetUserId: string | null = null
+) {
   await pool.query(
-    `INSERT INTO incident_events (incident_id, type, actor_id, message) VALUES ($1, $2, NULL, $3)`,
-    [incidentId, type, message]
+    `INSERT INTO incident_events (incident_id, type, actor_id, target_user_id, message) VALUES ($1, $2, NULL, $3, $4)`,
+    [incidentId, type, targetUserId, message]
   );
   const incidentResult = await pool.query(
     `SELECT id, org_id, idempotency_key, title, description, status,
@@ -91,7 +100,8 @@ async function pageStep(incidentId: string, orgId: string, step: number) {
     incidentId,
     orgId,
     step === 0 ? "paged" : "escalated",
-    `Paged ${user.name} via ${target.channel} (escalation step ${step + 1}/${steps.length}).`
+    `Paged ${user.name} via ${target.channel} (escalation step ${step + 1}/${steps.length}).`,
+    user.id
   );
 
   enqueueEscalationCheck({ incidentId, orgId, step }, target.timeoutMinutes * 60 * 1000);
@@ -191,6 +201,44 @@ async function embedAndSuggest(incidentId: string, orgId: string) {
   publishIncidentEvent({ orgId, type: "incident:triage-ready", incidentId });
 }
 
+// Runs once an incident is resolved: pulls the full event timeline (fired,
+// paged, escalated, acknowledged, notes, resolved — everything) and asks the
+// generation provider to draft a postmortem grounded in exactly that
+// timeline, explicitly instructed not to invent a root cause that isn't
+// actually reflected in the recorded events.
+async function generatePostmortem(incidentId: string, orgId: string) {
+  const incidentResult = await pool.query(
+    `SELECT id, title, description, status FROM incidents WHERE id = $1 AND org_id = $2`,
+    [incidentId, orgId]
+  );
+  const incident = incidentResult.rows[0];
+  if (!incident || incident.status !== "resolved") return;
+
+  const eventsResult = await pool.query(
+    `SELECT type, message, timestamp FROM incident_events WHERE incident_id = $1 ORDER BY timestamp ASC`,
+    [incidentId]
+  );
+  const events = eventsResult.rows.map((r) => ({
+    type: r.type,
+    message: r.message,
+    timestamp: r.timestamp.toISOString ? r.timestamp.toISOString() : String(r.timestamp),
+  }));
+
+  const content = await generationProvider.draftPostmortem(
+    { title: incident.title, description: incident.description },
+    events
+  );
+
+  await pool.query(
+    `INSERT INTO postmortems (incident_id, content, generated_by_ai)
+     VALUES ($1, $2, true)
+     ON CONFLICT (incident_id) DO UPDATE SET content = $2, generated_by_ai = true, created_at = now()`,
+    [incidentId, content]
+  );
+
+  publishIncidentEvent({ orgId, type: "incident:postmortem-ready", incidentId });
+}
+
 export const incidentWorker = new Worker<IncidentJobData>(
   INCIDENT_QUEUE_NAME,
   async (job: Job<IncidentJobData>) => {
@@ -200,17 +248,22 @@ export const incidentWorker = new Worker<IncidentJobData>(
       await handleEscalationCheck(job.data.incidentId, job.data.orgId, job.data.step);
     } else if (job.data.type === "embed-and-suggest") {
       await embedAndSuggest(job.data.incidentId, job.data.orgId);
+    } else if (job.data.type === "generate-postmortem") {
+      await generatePostmortem(job.data.incidentId, job.data.orgId);
     }
   },
   { connection: bullConnection }
 );
 
 incidentWorker.on("completed", (job) => {
-  console.log(`[worker] completed ${job.name} (${job.id})`);
+  logger.info({ jobName: job.name, jobId: job.id }, "worker job completed");
 });
 
 incidentWorker.on("failed", (job, err) => {
-  console.log(`[worker] ${job?.name} (${job?.id}) failed on attempt ${job?.attemptsMade}: ${err.message}`);
+  logger.warn(
+    { jobName: job?.name, jobId: job?.id, attempt: job?.attemptsMade, error: err.message },
+    "worker job failed"
+  );
 });
 
-console.log("PulseOps incident worker started, listening on queue:", INCIDENT_QUEUE_NAME);
+logger.info({ queue: INCIDENT_QUEUE_NAME }, "PulseOps incident worker started");

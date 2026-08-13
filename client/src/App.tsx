@@ -6,6 +6,8 @@ import { Dashboard } from "./pages/Dashboard";
 import { SchedulePage } from "./pages/Schedule";
 import { EscalationPolicies } from "./pages/EscalationPolicies";
 import { IncidentDetail } from "./pages/IncidentDetail";
+import { Analytics } from "./pages/Analytics";
+import { PublicStatus } from "./pages/PublicStatus";
 
 function ProtectedRoute({ children }: { children: JSX.Element }) {
   const { user } = useAuth();
@@ -50,6 +52,16 @@ function AppRoutes() {
           </ProtectedRoute>
         }
       />
+      <Route
+        path="/analytics"
+        element={
+          <ProtectedRoute>
+            <Analytics />
+          </ProtectedRoute>
+        }
+      />
+      {/* Deliberately NOT a ProtectedRoute — this is the public, unauthenticated page. */}
+      <Route path="/status/:orgId" element={<PublicStatus />} />
     </Routes>
   );
 }
