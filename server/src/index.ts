@@ -63,3 +63,24 @@ const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 4000;
 httpServer.listen(PORT, () => {
   logger.info(`PulseOps API + WebSocket listening on http://localhost:${PORT}`);
 });
+
+// Graceful shutdown: stop accepting new connections, let in-flight requests
+// finish, then exit. Critical for zero-downtime deploys / k8s SIGTERM.
+function shutdown(signal: string) {
+  logger.info({ signal }, "API shutting down gracefully");
+  httpServer.close((err) => {
+    if (err) {
+      logger.error({ err }, "error closing HTTP server");
+      process.exit(1);
+    }
+    process.exit(0);
+  });
+  // Force-exit if drain takes too long
+  setTimeout(() => {
+    logger.warn("graceful shutdown timed out — forcing exit");
+    process.exit(1);
+  }, 10_000).unref();
+}
+
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));

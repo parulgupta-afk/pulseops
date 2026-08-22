@@ -4,9 +4,13 @@ import { pool } from "../db/pool";
 import { hashPassword, verifyPassword } from "../utils/password";
 import { signToken } from "../utils/jwt";
 import { wrapAsync } from "../middleware/errorHandler";
+import { authRateLimit } from "../middleware/rateLimit";
 import type { AuthResponse } from "@pulseops/shared-types";
 
 export const authRouter = Router();
+
+// Brute-force protection on login/register — 20 attempts / 15 min per IP.
+authRouter.use(authRateLimit);
 
 const registerSchema = z.object({
   orgName: z.string().min(1),

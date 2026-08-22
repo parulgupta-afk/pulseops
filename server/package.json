@@ -8,7 +8,9 @@
     "worker": "tsx watch src/queue/worker.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
-    "migrate": "tsx src/db/migrate.ts"
+    "migrate": "tsx src/db/migrate.ts",
+    "test": "tsx --test src/__tests__/sla.test.ts src/__tests__/generateRotation.test.ts src/__tests__/incidentState.test.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
     "@opentelemetry/api": "^1.9.0",

@@ -28,7 +28,7 @@ Prometheus-format metrics — including one tied directly to the spec's non-func
 requirement (`incident_ingestion_duration_seconds`, p95 target < 200ms). A k6 load
 test script targets the incident ingestion endpoint specifically.
 
-**Phase 7 (this update):** all four stretch features, in the spec's priority order:
+**Phase 7:** all four stretch features, in the spec's priority order:
 1. **AI-generated postmortems** — drafted automatically when an incident is resolved,
    grounded in its full event timeline, reusing the same Gemini/mock generation
    provider from Phase 5.
@@ -39,6 +39,15 @@ test script targets the incident ingestion endpoint specifically.
    actually see.
 4. **SLA / error-budget tracking** — uptime percentage and error-budget burn-rate
    over a configurable window, computed from actual incident open/close times.
+
+**Phase 8 (SDE hardening):** production-oriented reliability without feature bloat:
+- **DLQ + escalation recovery** — exhausted page jobs still arm the next escalation
+  step; failures land in BullMQ DLQ + `failed_jobs` table + Prometheus counters
+- **Rate limiting** — Redis-backed (memory fallback) limits on auth, incident
+  ingestion, and public status
+- **Composite DB indexes** matched to real dashboard/on-call/status queries
+- **Graceful shutdown** on API + worker (`SIGTERM`/`SIGINT`)
+- **Unit tests + GitHub Actions CI** (rotation, SLA merge, state transitions)
 
 Verified in this scaffold: `server` and `client` typecheck clean, the client builds
 with Vite, both the API server and worker boot cleanly with the full Phase 1–7 stack
@@ -283,10 +292,9 @@ against real test cases before being wired into the API:
   — confirmed it still covers every day (better to bend a soft rule than leave a
   day uncovered) and reports each day it had to relax the cap
 
-These aren't wired up as an automated test suite yet (no Jest/Vitest in the repo) —
-worth adding if you want CI to catch regressions here, since this is the piece most
-likely to have an edge case (e.g. very large gaps between roster members' blackout
-dates, or a roster of one against a long window) that's worth locking down.
+Automated unit tests now cover the rotation generator, SLA merge logic, and
+incident state transitions (`npm test` / `server/src/__tests__/`). GitHub Actions
+CI runs typecheck + unit tests on every push/PR.
 
 ## What's not production-ready (by deliberate scope, not oversight)
 
@@ -304,13 +312,10 @@ covered honestly in "Known gaps" below rather than glossed over.
   if you add a manual shift and then generate a rotation covering the same dates,
   both will exist and `current-oncall` just returns whichever one sorts first.
   Fine for a demo/single-schedule use, worth a real conflict check if this goes further.
-- **Real gap, not just a "later" item:** if a `page` job exhausts all 3 of BullMQ's
-  retry attempts (i.e. the notification send genuinely never succeeds), the
-  escalation-check job for that step never gets scheduled — because it's only
-  enqueued *after* a successful send, inside `pageStep()`. So a permanently-failing
-  notification currently silently stalls the escalation chain instead of moving on
-  to the next step. The honest fix is to schedule the escalation-check independently
-  of send success, so a dead notification channel doesn't block the whole chain.
+- ~~**Real gap:** page job exhaustion stalled the escalation chain.~~ **Fixed:**
+  on final failure the worker records a timeline note, persists the job to
+  `failed_jobs` + the BullMQ DLQ, and still arms the escalation-check timer so
+  the next responder is paged.
 - Notifications are entirely mocked (see the Phase 4 section above) — no real
   Twilio/SendGrid wiring exists yet, by deliberate choice.
 - The real Gemini providers (`GeminiEmbeddingProvider`, `GeminiGenerationProvider`)
@@ -349,6 +354,6 @@ covered honestly in "Known gaps" below rather than glossed over.
   partial degradation or multiple independently-tracked services. Reasonable
   simplification given the data model has no "Service" entity; a fuller
   implementation would need one.
-- The public status page has no rate limiting — since it's intentionally
-  unauthenticated, that's a real DoS surface in a production deployment that this
-  project doesn't address.
+- ~~The public status page has no rate limiting.~~ **Fixed:** Redis-backed
+  (in-memory fallback) rate limits on auth, incident ingestion, and the public
+  status page. See `server/src/middleware/rateLimit.ts`.

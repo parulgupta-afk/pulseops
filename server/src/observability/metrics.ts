@@ -34,3 +34,18 @@ export const incidentIngestionDuration = new client.Histogram({
   buckets: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1],
   registers: [registry],
 });
+
+// Jobs that exhausted all BullMQ retries and were moved to the DLQ.
+export const queueJobsFailedTotal = new client.Counter({
+  name: "queue_jobs_failed_total",
+  help: "Jobs that exhausted all retry attempts and were dead-lettered",
+  labelNames: ["job_name"],
+  registers: [registry],
+});
+
+export const queueJobsCompletedTotal = new client.Counter({
+  name: "queue_jobs_completed_total",
+  help: "Successfully completed queue jobs",
+  labelNames: ["job_name"],
+  registers: [registry],
+});

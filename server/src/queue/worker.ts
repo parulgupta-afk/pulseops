@@ -5,7 +5,13 @@ dotenv.config();
 
 import { Worker, type Job } from "bullmq";
 import { bullConnection } from "./connection";
-import { INCIDENT_QUEUE_NAME, enqueueEscalationCheck, type IncidentJobData } from "./incidentQueue";
+import {
+  INCIDENT_QUEUE_NAME,
+  enqueueEscalationCheck,
+  moveToDlq,
+  type IncidentJobData,
+  type PageJobData,
+} from "./incidentQueue";
 import { pool } from "../db/pool";
 import { toVectorLiteral } from "../db/vector";
 import { notificationProvider } from "../notifications";
@@ -13,6 +19,7 @@ import { embeddingProvider, generationProvider, type SimilarIncidentContext } fr
 import { publishIncidentEvent } from "../realtime/redisPubSub";
 import { toCamelCase } from "../utils/caseConvert";
 import { logger } from "../utils/logger";
+import { queueJobsCompletedTotal, queueJobsFailedTotal } from "../observability/metrics";
 
 // Runs as its own process (`npm run dev:worker`), separate from the API
 // server. This is the actual "worker picks it up, resolves who's on-call,
@@ -105,6 +112,42 @@ async function pageStep(incidentId: string, orgId: string, step: number) {
   );
 
   enqueueEscalationCheck({ incidentId, orgId, step }, target.timeoutMinutes * 60 * 1000);
+}
+
+/**
+ * Called when a page job has exhausted all retries. Previously the escalation
+ * chain stalled forever because escalation-check was only scheduled after a
+ * successful send. Now we:
+ *   1. Record a timeline note so operators see the failure
+ *   2. Still schedule the escalation-check using the step's timeout so the
+ *      chain advances to the next responder
+ *   3. Persist to failed_jobs + DLQ for metrics/ops visibility
+ */
+async function handlePageFinalFailure(data: PageJobData, errorMessage: string, attemptsMade: number) {
+  const { incidentId, orgId, step } = data;
+  const incident = await getIncident(incidentId);
+  if (!incident || !incident.escalation_policy_id) return;
+
+  const steps = await getPolicySteps(incident.escalation_policy_id);
+  const target = steps[step];
+  const timeoutMinutes = target?.timeoutMinutes ?? 5;
+
+  await recordEventAndBroadcast(
+    incidentId,
+    orgId,
+    "note",
+    `Notification failed after ${attemptsMade} attempt(s) at escalation step ${step + 1}: ${errorMessage}. Escalation timer still armed.`
+  );
+
+  // Keep the chain moving — a dead notification channel must not block
+  // paging the next responder.
+  if (incident.status === "firing") {
+    await pool.query(
+      `UPDATE incidents SET current_escalation_step = $1 WHERE id = $2 AND current_escalation_step IS DISTINCT FROM $1`,
+      [step, incidentId]
+    );
+    enqueueEscalationCheck({ incidentId, orgId, step }, timeoutMinutes * 60 * 1000);
+  }
 }
 
 async function handleEscalationCheck(incidentId: string, orgId: string, step: number) {
@@ -239,6 +282,48 @@ async function generatePostmortem(incidentId: string, orgId: string) {
   publishIncidentEvent({ orgId, type: "incident:postmortem-ready", incidentId });
 }
 
+async function persistFailedJob(
+  job: Job<IncidentJobData> | undefined,
+  err: Error,
+  attemptsMade: number
+) {
+  if (!job) return;
+  const data = job.data;
+  const incidentId = "incidentId" in data ? data.incidentId : null;
+  const orgId = "orgId" in data ? data.orgId : null;
+
+  try {
+    await pool.query(
+      `INSERT INTO failed_jobs (queue_name, job_name, job_id, incident_id, org_id, payload, error_message, attempts_made)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      [
+        INCIDENT_QUEUE_NAME,
+        job.name,
+        job.id ?? null,
+        incidentId,
+        orgId,
+        JSON.stringify(data),
+        err.message,
+        attemptsMade,
+      ]
+    );
+  } catch (dbErr) {
+    logger.error(
+      { err: dbErr instanceof Error ? dbErr.message : String(dbErr) },
+      "failed to persist failed_jobs row"
+    );
+  }
+
+  try {
+    await moveToDlq(job.name, data, err.message, attemptsMade, job.id);
+  } catch (dlqErr) {
+    logger.error(
+      { err: dlqErr instanceof Error ? dlqErr.message : String(dlqErr) },
+      "failed to move job to DLQ"
+    );
+  }
+}
+
 export const incidentWorker = new Worker<IncidentJobData>(
   INCIDENT_QUEUE_NAME,
   async (job: Job<IncidentJobData>) => {
@@ -256,14 +341,61 @@ export const incidentWorker = new Worker<IncidentJobData>(
 );
 
 incidentWorker.on("completed", (job) => {
+  queueJobsCompletedTotal.inc({ job_name: job.name });
   logger.info({ jobName: job.name, jobId: job.id }, "worker job completed");
 });
 
-incidentWorker.on("failed", (job, err) => {
+incidentWorker.on("failed", async (job, err) => {
+  const attemptsMade = job?.attemptsMade ?? 0;
+  const maxAttempts = job?.opts.attempts ?? 1;
+  const isFinal = attemptsMade >= maxAttempts;
+
   logger.warn(
-    { jobName: job?.name, jobId: job?.id, attempt: job?.attemptsMade, error: err.message },
+    {
+      jobName: job?.name,
+      jobId: job?.id,
+      attempt: attemptsMade,
+      maxAttempts,
+      isFinal,
+      error: err.message,
+    },
     "worker job failed"
   );
+
+  if (!isFinal || !job) return;
+
+  queueJobsFailedTotal.inc({ job_name: job.name });
+  await persistFailedJob(job, err, attemptsMade);
+
+  // Critical fix: page jobs that exhaust retries used to leave the escalation
+  // chain stalled. Schedule the check anyway so the next step still fires.
+  if (job.data.type === "page") {
+    try {
+      await handlePageFinalFailure(job.data, err.message, attemptsMade);
+    } catch (recoveryErr) {
+      logger.error(
+        {
+          err: recoveryErr instanceof Error ? recoveryErr.message : String(recoveryErr),
+          incidentId: job.data.incidentId,
+        },
+        "failed to recover escalation chain after page exhaustion"
+      );
+    }
+  }
 });
+
+async function shutdown(signal: string) {
+  logger.info({ signal }, "worker shutting down gracefully");
+  try {
+    await incidentWorker.close();
+    await pool.end();
+  } catch (err) {
+    logger.error({ err }, "error during worker shutdown");
+  }
+  process.exit(0);
+}
+
+process.on("SIGTERM", () => void shutdown("SIGTERM"));
+process.on("SIGINT", () => void shutdown("SIGINT"));
 
 logger.info({ queue: INCIDENT_QUEUE_NAME }, "PulseOps incident worker started");

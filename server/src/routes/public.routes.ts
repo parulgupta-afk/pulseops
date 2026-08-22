@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { pool } from "../db/pool";
 import { wrapAsync } from "../middleware/errorHandler";
+import { publicStatusRateLimit } from "../middleware/rateLimit";
 import { toCamelCase } from "../utils/caseConvert";
 
 export const publicRouter = Router();
@@ -9,8 +10,10 @@ export const publicRouter = Router();
 // visits without logging in, same as status.github.com or similar. No
 // internal detail beyond title/status/timestamps is exposed: no assigned
 // responder, no escalation policy, nothing that reveals internal process.
+// Rate-limited because it's unauthenticated (known DoS surface otherwise).
 publicRouter.get(
   "/status/:orgId",
+  publicStatusRateLimit,
   wrapAsync(async (req, res) => {
     const orgResult = await pool.query(`SELECT id, name FROM orgs WHERE id = $1`, [req.params.orgId]);
     if (orgResult.rows.length === 0) {

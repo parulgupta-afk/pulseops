@@ -2,6 +2,7 @@ import { Queue } from "bullmq";
 import { bullConnection } from "./connection";
 
 export const INCIDENT_QUEUE_NAME = "incident-paging";
+export const INCIDENT_DLQ_NAME = "incident-paging-dlq";
 
 // This is the "enqueue" side, used by the API process (index.ts / routes).
 // The actual work happens in worker.ts, running as a separate process — that
@@ -10,6 +11,11 @@ export const INCIDENT_QUEUE_NAME = "incident-paging";
 // retrying, exactly per the spec's "incidents are pushed onto a queue rather
 // than handled inline" requirement.
 export const incidentQueue = new Queue(INCIDENT_QUEUE_NAME, { connection: bullConnection });
+
+// Dead-letter queue: jobs that exhaust all retries land here for operator
+// inspection. We also persist a row in Postgres (failed_jobs) so the record
+// survives Redis flushes.
+export const incidentDlq = new Queue(INCIDENT_DLQ_NAME, { connection: bullConnection });
 
 export interface PageJobData {
   type: "page";
@@ -37,16 +43,26 @@ export interface GeneratePostmortemJobData {
   orgId: string;
 }
 
-export type IncidentJobData = PageJobData | EscalationCheckJobData | EmbedAndSuggestJobData | GeneratePostmortemJobData;
+export type IncidentJobData =
+  | PageJobData
+  | EscalationCheckJobData
+  | EmbedAndSuggestJobData
+  | GeneratePostmortemJobData;
 
 export function enqueuePage(data: Omit<PageJobData, "type">) {
   // 3 attempts with exponential backoff — this is what actually exercises
   // the "retry with backoff before escalating" requirement when the mock
   // provider simulates a transient failure.
+  // removeOnFail: false keeps the failed job in Redis for inspection; the
+  // worker also copies it to the DLQ + Postgres on final failure.
   return incidentQueue.add(
     "page",
     { type: "page", ...data },
-    { attempts: 3, backoff: { type: "exponential", delay: 2000 } }
+    {
+      attempts: 3,
+      backoff: { type: "exponential", delay: 2000 },
+      removeOnFail: false,
+    }
   );
 }
 
@@ -54,7 +70,7 @@ export function enqueueEscalationCheck(data: Omit<EscalationCheckJobData, "type"
   return incidentQueue.add(
     "escalation-check",
     { type: "escalation-check", ...data },
-    { delay: delayMs }
+    { delay: delayMs, removeOnFail: false }
   );
 }
 
@@ -65,7 +81,11 @@ export function enqueueEmbedAndSuggest(data: Omit<EmbedAndSuggestJobData, "type"
   return incidentQueue.add(
     "embed-and-suggest",
     { type: "embed-and-suggest", ...data },
-    { attempts: 2, backoff: { type: "exponential", delay: 3000 } }
+    {
+      attempts: 2,
+      backoff: { type: "exponential", delay: 3000 },
+      removeOnFail: false,
+    }
   );
 }
 
@@ -73,6 +93,31 @@ export function enqueueGeneratePostmortem(data: Omit<GeneratePostmortemJobData, 
   return incidentQueue.add(
     "generate-postmortem",
     { type: "generate-postmortem", ...data },
-    { attempts: 2, backoff: { type: "exponential", delay: 3000 } }
+    {
+      attempts: 2,
+      backoff: { type: "exponential", delay: 3000 },
+      removeOnFail: false,
+    }
+  );
+}
+
+/** Move a permanently failed job into the DLQ for operator visibility. */
+export async function moveToDlq(
+  jobName: string,
+  data: IncidentJobData,
+  errorMessage: string,
+  attemptsMade: number,
+  jobId?: string
+) {
+  await incidentDlq.add(
+    `dlq:${jobName}`,
+    {
+      originalJobName: jobName,
+      originalData: data,
+      errorMessage,
+      attemptsMade,
+      failedAt: new Date().toISOString(),
+    },
+    { removeOnComplete: 1000, removeOnFail: 5000 }
   );
 }

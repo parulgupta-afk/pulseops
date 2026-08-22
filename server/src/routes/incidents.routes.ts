@@ -3,6 +3,7 @@ import { z } from "zod";
 import { pool } from "../db/pool";
 import { requireAuth } from "../middleware/auth";
 import { wrapAsync } from "../middleware/errorHandler";
+import { ingestionRateLimit } from "../middleware/rateLimit";
 import { toCamelCase } from "../utils/caseConvert";
 import { publishIncidentEvent } from "../realtime/redisPubSub";
 import { enqueuePage } from "../queue/incidentQueue";
@@ -10,6 +11,10 @@ import { enqueueEmbedAndSuggest, enqueueGeneratePostmortem } from "../queue/inci
 import { incidentsCreatedTotal, incidentIngestionDuration } from "../observability/metrics";
 
 export const incidentsRouter = Router();
+
+// Rate-limit ingestion before auth so unauthenticated flood still gets 429
+// (auth itself is cheap; the expensive path is the DB insert + queue fan-out).
+incidentsRouter.post("/", ingestionRateLimit);
 
 incidentsRouter.use(requireAuth);
 
